@@ -1,0 +1,321 @@
+import express from 'express';
+import http from 'http'; // Required for integrating Socket.IO
+import { Server } from 'socket.io';
+import { v4 as uuidv4 } from 'uuid';
+import dotenv from 'dotenv';
+import cors from 'cors';
+import connectDB from './config/db.js';
+import router from './routes/auth.routes.js';
+
+// Load environment variables
+dotenv.config();
+
+// Initialize DB (must be handled before server start, as you have it)
+connectDB();
+
+const app = express();
+app.use(express.json());
+
+// --- 1. Create HTTP Server for Socket.IO Integration ---
+const httpServer = http.createServer(app); 
+
+const PORT = process.env.PORT || 3000;
+
+// Configure CORS for Express and Socket.IO
+const allowedOrigins = ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173', 'http://localhost:4173'];
+
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true,
+}));
+
+// --- 2. Initialize Socket.IO and attach to HTTP Server ---
+const io = new Server(httpServer, {
+    cors: {
+        origin: allowedOrigins, // Use the same allowed origins for Socket.IO
+        methods: ["GET", "POST"]
+    }
+});
+
+// ------------------------------------------------------------------
+// --- IN-MEMORY GAME DATA STRUCTURES & LOGIC ---
+// ------------------------------------------------------------------
+
+const connectedUsers = new Map();
+const matchmakingQueue = [];
+const activeGames = {};
+
+/**
+ * GameState Class for Tic-Tac-Toe
+ */
+class GameState {
+    constructor(player1, player2, roomId) {
+        this.id = roomId;
+        this.players = {
+            'X': player1, // { userId, socketId }
+            'O': player2  // { userId, socketId }
+        };
+        this.board = Array(9).fill(null);
+        this.turn = 'X'; 
+        this.status = 'in_progress';
+    }
+
+    checkWinner() {
+        const lines = [
+            [0, 1, 2], [3, 4, 5], [6, 7, 8], // Rows
+            [0, 3, 6], [1, 4, 7], [2, 5, 8], // Columns
+            [0, 4, 8], [2, 4, 6],           // Diagonals
+        ];
+        
+        for (let i = 0; i < lines.length; i++) {
+            const [a, b, c] = lines[i];
+            if (this.board[a] && this.board[a] === this.board[b] && this.board[a] === this.board[c]) {
+                return this.board[a];
+            }
+        }
+        
+        if (this.board.every(cell => cell !== null)) {
+            return 'draw';
+        }
+        
+        return null;
+    }
+
+    makeMove(playerSymbol, cellIndex) {
+        if (this.status !== 'in_progress' || this.turn !== playerSymbol || 
+            cellIndex < 0 || cellIndex >= 9 || this.board[cellIndex] !== null) {
+            return false;
+        }
+
+        this.board[cellIndex] = playerSymbol;
+        const winner = this.checkWinner();
+
+        if (winner) {
+            this.status = winner === 'draw' ? 'draw' : `${winner}_wins`;
+        } else {
+            this.turn = playerSymbol === 'X' ? 'O' : 'X';
+        }
+
+        return true;
+    }
+
+    resetGame() {
+        this.board = Array(9).fill(null);
+        this.turn = Math.random() < 0.5 ? 'X' : 'O';
+        this.status = 'in_progress';
+        return this;
+    }
+}
+
+
+// --- MATCHMAKING AND ROOM MANAGEMENT ---
+
+function tryMatchPlayers(io) {
+    if (matchmakingQueue.length >= 2) {
+        const p1 = matchmakingQueue.shift();
+        const p2 = matchmakingQueue.shift();
+
+        if (!io.sockets.sockets.has(p1.socketId) || !io.sockets.sockets.has(p2.socketId)) {
+            if (io.sockets.sockets.has(p2.socketId)) matchmakingQueue.unshift(p2);
+            else if (io.sockets.sockets.has(p1.socketId)) matchmakingQueue.unshift(p1);
+            return;
+        }
+
+        const roomId = uuidv4();
+        const newGame = new GameState(p1, p2, roomId);
+        activeGames[roomId] = newGame;
+
+        const socket1 = io.sockets.sockets.get(p1.socketId);
+        const socket2 = io.sockets.sockets.get(p2.socketId);
+
+        socket1.join(roomId);
+        socket2.join(roomId);
+
+        socket1.data.roomId = roomId;
+        socket2.data.roomId = roomId;
+
+        console.log(`Match Found: Room ${roomId} | X: ${p1.userId} | O: ${p2.userId}`);
+
+        io.to(roomId).emit('matchStart', {
+            roomId: roomId,
+            game: newGame,
+            playerX: newGame.players.X.userId,
+            playerO: newGame.players.O.userId,
+        });
+
+        io.to(p1.socketId).emit('playerAssignment', { symbol: 'X' });
+        io.to(p2.socketId).emit('playerAssignment', { symbol: 'O' });
+
+        io.to(roomId).emit('gameStateUpdate', newGame);
+    }
+}
+
+function handleQuickMatch(socket, userId) {
+    if (matchmakingQueue.some(p => p.userId === userId) || socket.data.roomId) {
+        // Send error back over the socket connection
+        socket.emit('error', { message: 'Already in queue or in game.' });
+        return;
+    }
+
+    const player = { userId: userId, socketId: socket.id };
+    matchmakingQueue.push(player);
+    console.log(`User ${userId} added to queue. Queue size: ${matchmakingQueue.length}`);
+    // Send status back over the socket connection
+    socket.emit('queueStatus', { status: 'waiting', message: 'Finding opponent...' });
+
+    tryMatchPlayers(io);
+}
+
+// --- EXPRESS ROUTES ---
+
+app.get('/', (req, res) => {
+  res.send('<h1>Tic-Tac-Toe Matchmaking Service Running (HTTP & WS)</h1><p>Auth router mounted at /auth.</p>');
+});
+
+// mount the auth router at /auth
+app.use('/auth', router);
+
+// --- NEW HTTP POST ROUTE FOR MATCHMAKING INITIATION ---
+app.post('/quickmatch', (req, res) => {
+    // IMPORTANT: Assume authentication/session verification has occurred
+    // and the validated userId is available. 
+    // I am simulating this by reading it from the request body.
+    const userId = req.body.userId; 
+
+    if (!userId) {
+        return res.status(401).json({ message: "User ID required for matchmaking." });
+    }
+
+    // Find the active socket ID and socket instance for this user
+    const socketId = connectedUsers.get(userId);
+
+    if (!socketId || !io.sockets.sockets.has(socketId)) {
+        return res.status(400).json({ 
+            message: "Socket connection not found. Please ensure you are connected via WebSocket first." 
+        });
+    }
+    
+    const socket = io.sockets.sockets.get(socketId);
+
+    // Trigger the core matchmaking logic using the verified socket
+    handleQuickMatch(socket, userId);
+
+    // Return HTTP success response
+    return res.status(200).json({ 
+        message: "Matchmaking initiated via HTTP.", 
+        status: "queued" 
+    });
+});
+
+
+// --- SOCKET.IO CONNECTION HANDLING ---
+
+io.on('connection', (socket) => {
+    // Authentication simulation/extraction. 
+    const userId = socket.handshake.query.userId || `Guest-${socket.id.substring(0, 4)}`;
+    socket.userId = userId;
+    // Map the user ID to their current socket ID
+    connectedUsers.set(userId, socket.id); 
+    console.log(`User ${userId} connected.`);
+    socket.emit('authSuccess', { userId: userId });
+
+    // The 'quickMatch' event is kept here as a fallback or for re-queueing within the app,
+    // but the primary initiation is now expected via the HTTP POST /quickmatch route.
+    socket.on('quickMatch', () => {
+        handleQuickMatch(socket, userId);
+    });
+
+    // Make Move event
+    socket.on('makeMove', (data) => {
+        const roomId = socket.data.roomId;
+        const cellIndex = data.cellIndex;
+
+        if (!roomId || !activeGames[roomId]) {
+            socket.emit('error', { message: 'Not in an active game.' });
+            return;
+        }
+
+        const game = activeGames[roomId];
+        const playerSymbol = game.players.X.socketId === socket.id ? 'X' : 
+                             game.players.O.socketId === socket.id ? 'O' : null;
+
+        if (!playerSymbol) {
+             socket.emit('error', { message: 'Player is not recognized in this room.' });
+             return;
+        }
+
+        if (game.makeMove(playerSymbol, cellIndex)) {
+            io.to(roomId).emit('gameStateUpdate', game);
+
+            if (game.status !== 'in_progress') {
+                io.to(roomId).emit('gameOver', { status: game.status });
+            }
+        } else {
+            socket.emit('error', { message: 'Invalid move.' });
+        }
+    });
+
+    // Rematch Request
+    socket.on('rematch', () => {
+        const roomId = socket.data.roomId;
+        if (!roomId || !activeGames[roomId]) return;
+
+        const game = activeGames[roomId];
+        const playerSymbol = game.players.X.socketId === socket.id ? 'X' : 
+                             game.players.O.socketId === socket.id ? 'O' : null;
+
+        if (!playerSymbol) return;
+
+        if (!game.rematchVotes) { game.rematchVotes = {}; }
+        game.rematchVotes[playerSymbol] = true;
+        io.to(roomId).emit('rematchVoteStatus', game.rematchVotes);
+
+        if (game.rematchVotes.X && game.rematchVotes.O) {
+            game.resetGame();
+            delete game.rematchVotes;
+            io.to(roomId).emit('rematchStart', game);
+            io.to(roomId).emit('gameStateUpdate', game);
+        }
+    });
+
+    // Disconnecting handler (before socket leaves rooms)
+    socket.on('disconnecting', () => {
+        const roomId = socket.data.roomId;
+        if (roomId && activeGames[roomId]) {
+            const game = activeGames[roomId];
+            
+            const disconnectingSymbol = game.players.X.socketId === socket.id ? 'X' : 
+                                        game.players.O.socketId === socket.id ? 'O' : null;
+
+            if (disconnectingSymbol) {
+                const opponentSymbol = disconnectingSymbol === 'X' ? 'O' : 'X';
+                const opponentSocketId = game.players[opponentSymbol].socketId;
+                
+                if (io.sockets.sockets.has(opponentSocketId)) {
+                    io.to(opponentSocketId).emit('opponentLeft', { 
+                        message: `${userId} has disconnected. You win!` 
+                    });
+                }
+                
+                delete activeGames[roomId];
+            }
+        }
+    });
+
+    // Disconnect cleanup
+    socket.on('disconnect', () => {
+        const queueIndex = matchmakingQueue.findIndex(p => p.socketId === socket.id);
+        if (queueIndex !== -1) {
+            matchmakingQueue.splice(queueIndex, 1);
+        }
+        connectedUsers.delete(userId);
+        console.log(`User ${userId} disconnected. Queue size: ${matchmakingQueue.length}`);
+    });
+});
+
+
+// --- 3. Start Listening on the HTTP Server ---
+httpServer.listen(PORT, () => {
+  console.log(`🚀 HTTP Server running on port ${PORT}`);
+  console.log(`✅ Socket.IO active for real-time traffic on the same port.`);
+});
