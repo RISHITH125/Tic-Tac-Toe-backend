@@ -2,7 +2,8 @@ import express from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import connectDB from './config/db.js';
-import router from './routes/auth.routes.js';
+import authrouter from './routes/auth.routes.js';
+import gamerouter from './routes/game.routes.js';
 import { webSocketServer } from './socket/game.socket.js';
 
 // load environment variables as early as possible
@@ -35,9 +36,9 @@ app.get('/', (req, res) => {
 });
 
 // mount the auth router at /auth so routes like POST /auth/signin work
-app.use('/auth', router);
+app.use('/auth', authrouter);
 
-
+app.use('/game', gamerouter);
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);

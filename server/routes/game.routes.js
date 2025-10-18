@@ -3,8 +3,8 @@ import { verifyToken } from '../middlewares/auth.middleware.js';
 
 import { quickMatch } from '../controllers/game.controller.js';
 
-const router = express.Router();
+const gamerouter = express.Router();
 
-router.post('/quick-match', verifyToken, quickMatch);
+gamerouter.post('/quick-match', verifyToken, quickMatch);
 
-export default router;
+export default gamerouter;

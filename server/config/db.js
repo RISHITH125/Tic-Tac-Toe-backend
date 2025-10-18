@@ -7,10 +7,7 @@ dotenv.config();
 const MONGODB__URI = "mongodb://localhost:27017/TicTacToeDB";
 const connectDB = async () => {
     try {
-        await mongoose.connect(MONGODB__URI, {
-            useNewUrlParser: true,
-            useUnifiedTopology: true,
-        });
+        await mongoose.connect(MONGODB__URI);
         console.log("✅ MongoDB connected");
     } catch (error) {
         console.error("❌ MongoDB connection error:", error);

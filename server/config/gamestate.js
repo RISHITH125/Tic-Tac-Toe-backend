@@ -14,6 +14,10 @@ class GameState {
 
         this.currentTurn = 'X'; // 'X' starts first by default
         this.status = 'ongoing'; // can be 'ongoing', 'draw', 'X_won', 'O_won'
+        this.winnerSymbol = null;
+        this.winner_username = null;
+        this.looser_symbol = null;
+        this.looser_username = null;
     }
 
     // return plain data for serialization
@@ -41,6 +45,10 @@ class GameState {
             const [a, b, c] = combination;
             if (this.board[a] && this.board[a] === this.board[b] && this.board[a] === this.board[c]) {
                 this.status = `${this.board[a]}_won`;
+                this.winnerSymbol = this.board[a];
+                this.winner_username = this.player[this.winnerSymbol];
+                this.looser_symbol = this.winnerSymbol === 'X' ? 'O' : 'X';
+                this.looser_username = this.player[this.looser_symbol];
                 return this.status;
             }
         }
@@ -59,6 +67,7 @@ class GameState {
         }
         this.board[position] = playerSymbol;
         this.currentTurn = this.currentTurn === 'X' ? 'O' : 'X';
+        
         this.checkWinner();
     }
 
