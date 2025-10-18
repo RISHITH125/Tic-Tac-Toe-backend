@@ -10,7 +10,7 @@ export const quickMatch = async (req, res) => {
         }
         
         try{
-            socketHandler(user._id.toString());
+            await socketHandler(user._id.toString());
             console.log(`🔔 Quick match requested by user: ${user.username} (${user._id})`);
             return res.status(200).json({ status: 'success', message: 'Quick match initiated. Check your socket connection for updates.' });
         }

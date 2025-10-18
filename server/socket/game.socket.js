@@ -17,6 +17,31 @@ const pendingQuickMatch = new Set(); // userIds waiting for socket connection
 
 let io = null;
 
+// Enforce only one active socket per user: disconnect and clean up older sockets
+function enforceSingleActiveSocket(userId, keepSocketId) {
+  if (!io) return;
+  const set = userSockets.get(userId);
+  if (!set || set.size === 0) return;
+  for (const sid of Array.from(set)) {
+    if (sid === keepSocketId) continue;
+    try {
+      const s = io.sockets.sockets.get(sid);
+      if (s) {
+        console.log(`🔌 Disconnecting old socket ${sid} for user ${userId}`);
+        s.disconnect(true);
+      }
+    } catch (e) {
+      console.warn('⚠️ Failed to disconnect socket', sid, e && e.message);
+    }
+    socketToUser.delete(sid);
+    set.delete(sid);
+  }
+  // keep only the new socket id
+  userSockets.set(userId, new Set([keepSocketId]));
+  const existing = connectedUsers.get(userId) || {};
+  connectedUsers.set(userId, { socketId: keepSocketId, username: existing.username || null });
+}
+
 function constantLogs() {
   try {
     // prefer repository root (one level above server/) when running the server from server/
@@ -131,22 +156,29 @@ export function webSocketServer(app, allowedOrigins) {
         if (!userSockets.has(uid)) userSockets.set(uid, new Set());
         userSockets.get(uid).add(socket.id);
 
+  // enforce single active socket policy (disconnect older sockets)
+  try { enforceSingleActiveSocket(uid, socket.id); } catch (e) { console.warn('enforceSingleActiveSocket failed', e); }
+
         console.log(
           `✅ Authenticated socket ${socket.id} as user ${socket.data.user.username} (${uid})`
         );
 
         // process pending quick-match if user requested it before socket connected
         if (pendingQuickMatch.has(uid)) {
+          // remove pending marker and defer processing until the socket is fully registered in io
           pendingQuickMatch.delete(uid);
+          setImmediate(() => {
             try {
-              handleQuickMatch(socket, uid);
+              const s = io && io.sockets && io.sockets.sockets.get(socket.id);
+              if (s) handleQuickMatch(s, uid);
+              else {
+                // if still not present, re-mark pending to be handled later
+                pendingQuickMatch.add(uid);
+              }
             } catch (err) {
-              console.error(
-                "❌ Error processing pending quick match after auth:",
-                err
-              );
+              console.error("❌ Error processing deferred pending quick match:", err);
             }
-
+          });
         }
       }
       return next();
@@ -164,29 +196,46 @@ export function webSocketServer(app, allowedOrigins) {
       socket.data.user || null
     );
 
-    // optional fallback for clients that don't provide token at handshake
-    socket.on("register", ({ userId, username }) => {
-      if (!userId) return;
-      const uid = userId.toString();
-      connectedUsers.set(uid, { socketId: socket.id, username });
-      socketToUser.set(socket.id, uid);
-      if (!userSockets.has(uid)) userSockets.set(uid, new Set());
-      userSockets.get(uid).add(socket.id);
-      socket.data.user = { id: uid, username };
-      console.log(
-        `✅ Registered (fallback) user ${username} as ${uid} -> socket ${socket.id}`
-      );
-
-      // If the user previously asked for a quick-match before connecting, start it now
-      if (pendingQuickMatch.has(uid)) {
-        pendingQuickMatch.delete(uid);
-        try {
-          handleQuickMatch(socket, uid);
-        } catch (err) {
-          console.error("❌ Error handling pending quick match for", uid, err);
+      // fallback registration: require a JWT token to avoid bypassing authentication
+      socket.on("register", async ({ token }) => {
+        if (!token) {
+          socket.emit('error', { message: 'register requires an authentication token' });
+          return;
         }
-      }
-    });
+        try {
+          const decoded = jwt.verify(token, JWT_SECRET);
+          const uid = decoded.id?.toString();
+          const username = decoded.username;
+          if (!uid) {
+            socket.emit('error', { message: 'Invalid token payload' });
+            return;
+          }
+
+          connectedUsers.set(uid, { socketId: socket.id, username });
+          socketToUser.set(socket.id, uid);
+          if (!userSockets.has(uid)) userSockets.set(uid, new Set());
+          userSockets.get(uid).add(socket.id);
+
+          // enforce single active socket policy for register fallback
+          try { enforceSingleActiveSocket(uid, socket.id); } catch (e) { console.warn('enforceSingleActiveSocket failed', e); }
+          socket.data.user = { id: uid, username };
+          console.log(`✅ Registered (auth) user ${username} as ${uid} -> socket ${socket.id}`);
+
+          // If the user previously asked for a quick-match before connecting, start it now
+          if (pendingQuickMatch.has(uid)) {
+            pendingQuickMatch.delete(uid);
+            try {
+              const live = getLiveSocketForUser(uid) || socket;
+              handleQuickMatch(live, uid);
+            } catch (err) {
+              console.error("❌ Error handling pending quick match for", uid, err);
+            }
+          }
+        } catch (err) {
+          console.warn('⚠️ register token verification failed:', err && err.message);
+          socket.emit('error', { message: 'Token verification failed' });
+        }
+      });
 
     // handle disconnect: remove maps, tear down any active game the user was in and notify opponent
     socket.on("disconnect", (reason) => {
@@ -491,13 +540,15 @@ function handleQuickMatch(socket, userid) {
     status: "waiting",
     message: "Searching for an opponent...",
   });
-  tryMatchPlayers();
+  // run matching asynchronously to reduce races with socket registration
+  setImmediate(() => {
+    tryMatchPlayers();
+  });
 }
 
 export const socketHandler = async (userid) => {
   if (!io) return { error: "Socket server not initialized" };
   const userEntry = connectedUsers.get(userid);
-
   const activeSocketIds = userSockets.get(userid);
   if (!activeSocketIds || activeSocketIds.size === 0) {
     // no socket yet — mark for pending quick match
@@ -520,7 +571,7 @@ export const socketHandler = async (userid) => {
 
   // socket present — proceed synchronously
   try {
-    handleQuickMatch(socket, userid);
+    await (async()=>{ handleQuickMatch(socket, userid);})();
     return { ok: true };
   } catch (err) {
     console.error("❌ Error in socketHandler:", err);
