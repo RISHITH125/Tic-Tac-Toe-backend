@@ -63,7 +63,7 @@ class GameState {
             throw new Error('Game has already ended.');
         }
         if (this.board[position] !== null) {
-            throw new Error('Invalid move.');
+            throw new Error('Invalid move ,the cell is already occupied.');
         }
         this.board[position] = playerSymbol;
         this.currentTurn = this.currentTurn === 'X' ? 'O' : 'X';

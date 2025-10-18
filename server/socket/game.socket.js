@@ -6,6 +6,7 @@ import jwt from "jsonwebtoken";
 import LeaderBoard from "../models/LeaderBoard.js";
 import fs from "fs";
 import path from "path";
+import { set } from "mongoose";
 
 // server-side socket maps and queues
 const connectedUsers = new Map(); // userId -> { socketId, username }
@@ -17,6 +18,50 @@ const pendingQuickMatch = new Set(); // userIds waiting for socket connection
 
 let io = null;
 
+
+function terminateActiveGameCleanup(roomId) {
+    const game = activeGames[roomId];
+    if (!game) return;
+
+    const pX = game.players.X;
+    const pO = game.players.O;
+    
+    // Helper to disconnect and cleanup maps for a single socket
+    const cleanupSocket = (socketId, userId) => {
+        if (!socketId) return;
+
+        const socket = io.sockets.sockets.get(socketId);
+        if (socket) {
+            socket.leave(roomId);
+            socket.disconnect(true); // Force client to disconnect
+            console.log(`🧹 Socket ${socketId} disconnected and left room ${roomId}.`);
+            
+            // Clean up all related maps for this specific socket
+            socketToUser.delete(socketId);
+
+            const userSet = userSockets.get(userId);
+            if (userSet) {
+                userSet.delete(socketId);
+                if (userSet.size === 0) {
+                    userSockets.delete(userId);
+                    connectedUsers.delete(userId);
+                    console.log(`🧹 User ${userId} fully removed from connectedUsers and userSockets.`);
+                } else {
+                    // Update connectedUsers to point to a remaining active socket
+                    const [nextSocketId] = userSet;
+                    const existing = connectedUsers.get(userId);
+                    if (existing) existing.socketId = nextSocketId;
+                }
+            }
+        }
+    };
+
+    cleanupSocket(pX.socketId, pX.userId);
+    cleanupSocket(pO.socketId, pO.userId);
+
+    delete activeGames[roomId];
+    console.log(`🧹 Game ${roomId} cleaned up from activeGames.`);
+}
 // Enforce only one active socket per user: disconnect and clean up older sockets
 function enforceSingleActiveSocket(userId, keepSocketId) {
   if (!io) return;
@@ -325,23 +370,28 @@ export function webSocketServer(app, allowedOrigins) {
 
     // handle player moves
     socket.on("player_move", (payload) => {
-      const { roomId, position } = payload || {};
-      if (!roomId || typeof position !== "number") {
-        socket.emit("error", { message: "Invalid move payload" });
+      // console.log("▶️ player_move received:", payload);
+      const { roomId, index } = payload || {};
+      if (!roomId || typeof index !== "number") {
+        socket.emit("error", { message: "Invalid move payload", flag:"invalid_move_type" });
         return;
       }
       const game = activeGames[roomId];
       if (!game) {
-        socket.emit("error", { message: "Invalid game room." });
+        socket.emit("error", { message: "Invalid game room.",flag:"invalid_room" });
         return;
       }
 
+      // console.log("game found for roomId:", roomId, game);
       const playerSymbol =
         game.players.X.socketId === socket.id
           ? "X"
           : game.players.O.socketId === socket.id
           ? "O"
           : null;
+
+      // console.log(playerSymbol ? `▶️ Player is ${playerSymbol}` : "❌ Player symbol not found");
+
       if (!playerSymbol) {
         socket.emit("error", { message: "You are not a player in this game." });
         return;
@@ -352,31 +402,35 @@ export function webSocketServer(app, allowedOrigins) {
       }
 
       try {
-        game.gameState.makeMove(playerSymbol, position);
+        game.gameState.makeMove(playerSymbol, index);
+
         game.turn = game.gameState.currentTurn;
         const status = game.gameState.status;
-
-        io.to(roomId).emit("move_made", {
-          position,
+        const payload = {
+          position: index,
           symbol: playerSymbol,
           gameState: game.gameState.toJSON(),
-        });
+        }
 
         if (status === "X_won" || status === "O_won") {
-          const winnerInfo = game.gameState.getWinnerInfo();
-          io.to(roomId).emit("game_over", {
-            winner: winnerInfo?.symbol,
-            user: winnerInfo?.user,
-          });
-          // update leaderboard: winner wins, loser loses
-          if (winnerInfo?.user?.username) {
+          const winnerInfo = game.gameState.winnerSymbol;
+          const winner_username=game.gameState.winner_username;
+          const payload={
+            winner: winnerInfo,
+            user: winner_username,
+            gameState:game.gameState.toJSON()
+          }
+          console.log(payload)
+          io.to(roomId).emit("game_over",payload);
+
+          if (winner_username) {
             LeaderBoard.findOneAndUpdate(
-              { username: winnerInfo.user.username },
+              { username: winner_username },
               { $inc: { wins: 1, totalPoints: 10 } },
               { upsert: true, new: true }
             ).catch(() => {});
             const loser =
-              winnerInfo.symbol === "X" ? game.players.O : game.players.X;
+              winnerInfo === "X" ? game.players.O : game.players.X;
             if (loser?.userId)
               LeaderBoard.findOneAndUpdate(
                 { userId: loser.userId },
@@ -384,8 +438,19 @@ export function webSocketServer(app, allowedOrigins) {
                 { upsert: true, new: true }
               ).catch(() => {});
           }
+          setTimeout(() => {
+          terminateActiveGameCleanup(roomId);
+          }, 2000);
+          return;
         } else if (status === "draw") {
-          io.to(roomId).emit("game_over", { winner: null });
+          const winnerInfo=status;
+          const payload={
+              winner:winnerInfo,
+              gameState:game.gameState.toJSON()
+
+          }
+          console.log(payload)
+          io.to(roomId).emit("game_over", payload);
           LeaderBoard.findOneAndUpdate(
             { username: game.players.X.username },
             { $inc: { draws: 1, totalPoints: 5 } },
@@ -396,9 +461,22 @@ export function webSocketServer(app, allowedOrigins) {
             { $inc: { draws: 1, totalPoints: 5 } },
             { upsert: true, new: true }
           ).catch(() => {});
+          setTimeout(() => {
+            terminateActiveGameCleanup(roomId);
+          }, 2000);
+          return;
         }
+
+        io.to(roomId).emit("move_made", payload);
+
+        
       } catch (error) {
-        socket.emit("error", { message: error.message });
+        console.log("❌ Error processing move:", error.message);
+        const payload={
+          message: error.message,
+          flag:"invalid_move"
+        }
+        socket.emit("error", payload);
       }
     });
   });
