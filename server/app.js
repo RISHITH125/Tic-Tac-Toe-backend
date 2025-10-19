@@ -4,6 +4,7 @@ import cors from 'cors';
 import connectDB from './config/db.js';
 import authrouter from './routes/auth.routes.js';
 import gamerouter from './routes/game.routes.js';
+import clientRouter from './routes/user.routes.js';
 import { webSocketServer } from './socket/game.socket.js';
 
 // load environment variables as early as possible
@@ -39,6 +40,8 @@ app.get('/', (req, res) => {
 app.use('/auth', authrouter);
 
 app.use('/game', gamerouter);
+
+app.use('/user', clientRouter);
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);

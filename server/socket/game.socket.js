@@ -174,7 +174,7 @@ export function webSocketServer(app, allowedOrigins) {
 
   // Middleware to authenticate socket connections via JWT (handshake.auth.token or query.token)
   const JWT_SECRET = process.env.JWT_SECRET;
-  constantLogs();
+  // constantLogs();
 
   io.use((socket, next) => {
     try {
@@ -420,7 +420,6 @@ export function webSocketServer(app, allowedOrigins) {
             user: winner_username,
             gameState:game.gameState.toJSON()
           }
-          console.log(payload)
           io.to(roomId).emit("game_over",payload);
 
           if (winner_username) {
