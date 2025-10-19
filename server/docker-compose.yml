@@ -1,0 +1,9 @@
+services:
+  backend:
+    build: .
+    image: tic-tac-toe-backend:latest
+    container_name: tic-tac-toe-backend
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./.env.prod

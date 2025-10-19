@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 // dont forget to put the production URI in .env file
-const MONGODB__URI = "mongodb://localhost:27017/TicTacToeDB";
+const MONGODB__URI = process.env.MONGODB_URI 
 const connectDB = async () => {
     try {
         await mongoose.connect(MONGODB__URI);
