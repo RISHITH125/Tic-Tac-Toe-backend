@@ -3,7 +3,7 @@
 This is the **authoritative backend** for the multiplayer **Tic Tac Toe** game built with **Express.js** and **Socket.IO**.
 It handles real-time matchmaking, game state validation, and leaderboard management — all while ensuring that gameplay logic stays fully on the server for fairness and security.
 
-Frontend: [React.js Client](https://ticstacsortoes.netlify.app) *(link to your frontend repo if you have one)*
+Frontend: [React.js Client](https://ticstacsortoes.netlify.app) 
 Backend: Express + Socket.IO
 Deployment: Docker on AWS (with Caddy as reverse proxy)
 
